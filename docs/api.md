@@ -160,6 +160,11 @@ what gets sent over the wire.*
 * `def clear([domain], [path])`
 * *Standard mutable mapping interface*
 
+## `RetryPolicy`
+
+::: httpx.RetryPolicy
+    :docstring:
+
 ## `Proxy`
 
 *A configuration of the proxy server.*

@@ -27,6 +27,7 @@ from ._exceptions import (
     request_context,
 )
 from ._models import Cookies, Headers, Request, Response
+from ._retries import RetryPolicy
 from ._status_codes import codes
 from ._transports.base import AsyncBaseTransport, BaseTransport
 from ._transports.default import AsyncHTTPTransport, HTTPTransport
@@ -89,6 +90,12 @@ def _same_origin(url: URL, other: URL) -> bool:
         and url.host == other.host
         and _port_or_default(url) == _port_or_default(other)
     )
+
+
+async def _async_sleep(seconds: float) -> None:
+    import anyio
+
+    await anyio.sleep(seconds)
 
 
 class UseClientDefault:
@@ -200,6 +207,7 @@ class BaseClient:
         base_url: URL | str = "",
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        retry: RetryPolicy | None = None,
     ) -> None:
         event_hooks = {} if event_hooks is None else event_hooks
 
@@ -218,6 +226,7 @@ class BaseClient:
         }
         self._trust_env = trust_env
         self._default_encoding = default_encoding
+        self.retry = retry
         self._state = ClientState.UNOPENED
 
     @property
@@ -634,6 +643,8 @@ class Client(BaseClient):
     * **default_encoding** - *(optional)* The default encoding to use for decoding
     response text, if no charset information is included in a response Content-Type
     header. Set to a callable for automatic character set detection. Default: "utf-8".
+    * **retry** - *(optional)* A `RetryPolicy` used to retry failed requests.
+    Defaults to `None`, which disables retries.
     """
 
     def __init__(
@@ -658,6 +669,7 @@ class Client(BaseClient):
         base_url: URL | str = "",
         transport: BaseTransport | None = None,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        retry: RetryPolicy | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -671,6 +683,7 @@ class Client(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            retry=retry,
         )
 
         if http2:
@@ -916,6 +929,7 @@ class Client(BaseClient):
             auth=auth,
             follow_redirects=follow_redirects,
             history=[],
+            retry=None if stream else self.retry,
         )
         try:
             if not stream:
@@ -933,6 +947,7 @@ class Client(BaseClient):
         auth: Auth,
         follow_redirects: bool,
         history: list[Response],
+        retry: RetryPolicy | None = None,
     ) -> Response:
         auth_flow = auth.sync_auth_flow(request)
         try:
@@ -943,6 +958,7 @@ class Client(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    retry=retry,
                 )
                 try:
                     try:
@@ -966,6 +982,7 @@ class Client(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        retry: RetryPolicy | None = None,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -976,7 +993,10 @@ class Client(BaseClient):
             for hook in self._event_hooks["request"]:
                 hook(request)
 
-            response = self._send_single_request(request)
+            if retry is None:
+                response = self._send_single_request(request)
+            else:
+                response = self._send_single_request_with_retry(request, retry)
             try:
                 for hook in self._event_hooks["response"]:
                     hook(response)
@@ -997,6 +1017,49 @@ class Client(BaseClient):
             except BaseException as exc:
                 response.close()
                 raise exc
+
+    def _send_single_request_with_retry(
+        self, request: Request, retry: RetryPolicy
+    ) -> Response:
+        """
+        Sends a single request, retrying it according to the retry policy.
+        """
+        if not retry.is_retryable_request(request):
+            return self._send_single_request(request)
+
+        attempt = 1
+        while True:
+            try:
+                response = self._send_single_request(request)
+                try:
+                    response.read()
+                except BaseException:
+                    response.close()
+                    raise
+            except Exception as exc:
+                if attempt >= retry.max_attempts or not retry.is_retryable_exception(
+                    exc
+                ):
+                    raise
+                delay = retry.get_delay(attempt)
+            else:
+                if attempt >= retry.max_attempts or not retry.is_retryable_response(
+                    response
+                ):
+                    return response
+                delay = retry.get_delay(attempt, response)
+                response.close()
+
+            logger.debug(
+                "Retrying request: %s %s in %.2f seconds (attempt %d of %d)",
+                request.method,
+                request.url,
+                delay,
+                attempt + 1,
+                retry.max_attempts,
+            )
+            time.sleep(delay)
+            attempt += 1
 
     def _send_single_request(self, request: Request) -> Response:
         """
@@ -1348,6 +1411,8 @@ class AsyncClient(BaseClient):
     * **default_encoding** - *(optional)* The default encoding to use for decoding
     response text, if no charset information is included in a response Content-Type
     header. Set to a callable for automatic character set detection. Default: "utf-8".
+    * **retry** - *(optional)* A `RetryPolicy` used to retry failed requests.
+    Defaults to `None`, which disables retries.
     """
 
     def __init__(
@@ -1372,6 +1437,7 @@ class AsyncClient(BaseClient):
         transport: AsyncBaseTransport | None = None,
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        retry: RetryPolicy | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -1385,6 +1451,7 @@ class AsyncClient(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            retry=retry,
         )
 
         if http2:
@@ -1631,6 +1698,7 @@ class AsyncClient(BaseClient):
             auth=auth,
             follow_redirects=follow_redirects,
             history=[],
+            retry=None if stream else self.retry,
         )
         try:
             if not stream:
@@ -1648,6 +1716,7 @@ class AsyncClient(BaseClient):
         auth: Auth,
         follow_redirects: bool,
         history: list[Response],
+        retry: RetryPolicy | None = None,
     ) -> Response:
         auth_flow = auth.async_auth_flow(request)
         try:
@@ -1658,6 +1727,7 @@ class AsyncClient(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    retry=retry,
                 )
                 try:
                     try:
@@ -1681,6 +1751,7 @@ class AsyncClient(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        retry: RetryPolicy | None = None,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -1691,7 +1762,10 @@ class AsyncClient(BaseClient):
             for hook in self._event_hooks["request"]:
                 await hook(request)
 
-            response = await self._send_single_request(request)
+            if retry is None:
+                response = await self._send_single_request(request)
+            else:
+                response = await self._send_single_request_with_retry(request, retry)
             try:
                 for hook in self._event_hooks["response"]:
                     await hook(response)
@@ -1713,6 +1787,49 @@ class AsyncClient(BaseClient):
             except BaseException as exc:
                 await response.aclose()
                 raise exc
+
+    async def _send_single_request_with_retry(
+        self, request: Request, retry: RetryPolicy
+    ) -> Response:
+        """
+        Sends a single request, retrying it according to the retry policy.
+        """
+        if not retry.is_retryable_request(request):
+            return await self._send_single_request(request)
+
+        attempt = 1
+        while True:
+            try:
+                response = await self._send_single_request(request)
+                try:
+                    await response.aread()
+                except BaseException:
+                    await response.aclose()
+                    raise
+            except Exception as exc:
+                if attempt >= retry.max_attempts or not retry.is_retryable_exception(
+                    exc
+                ):
+                    raise
+                delay = retry.get_delay(attempt)
+            else:
+                if attempt >= retry.max_attempts or not retry.is_retryable_response(
+                    response
+                ):
+                    return response
+                delay = retry.get_delay(attempt, response)
+                await response.aclose()
+
+            logger.debug(
+                "Retrying request: %s %s in %.2f seconds (attempt %d of %d)",
+                request.method,
+                request.url,
+                delay,
+                attempt + 1,
+                retry.max_attempts,
+            )
+            await _async_sleep(delay)
+            attempt += 1
 
     async def _send_single_request(self, request: Request) -> Response:
         """
