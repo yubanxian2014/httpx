@@ -192,7 +192,7 @@ def test_invalid_retry_after_falls_back_to_backoff(
     sleeps: list[float], monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
     monkeypatch.setattr("random.uniform", lambda a, b: b)
-    server = Server(httpx.Response(503, headers={"Retry-After": value}), 200)
+    server = Server(httpx.Response(503, headers={b"Retry-After": value.encode()}), 200)
     with make_client(server) as client:
         client.get("https://example.org/")
 
