@@ -6,6 +6,7 @@ from ._config import *
 from ._content import *
 from ._exceptions import *
 from ._models import *
+from ._retries import *
 from ._status_codes import *
 from ._transports import *
 from ._types import *
@@ -82,6 +83,7 @@ __all__ = [
     "RequestNotRead",
     "Response",
     "ResponseNotRead",
+    "RetryPolicy",
     "stream",
     "StreamClosed",
     "StreamConsumed",
