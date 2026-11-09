@@ -187,7 +187,7 @@ def test_retry_after_capped_at_max_backoff(sleeps: list[float]) -> None:
     assert sleeps == [10.0]
 
 
-@pytest.mark.parametrize("value", ["invalid", "-5", "1.5", ""])
+@pytest.mark.parametrize("value", ["invalid", "-5", "1.5", "", "\u00b2"])
 def test_invalid_retry_after_falls_back_to_backoff(
     sleeps: list[float], monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:

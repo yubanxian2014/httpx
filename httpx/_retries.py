@@ -132,7 +132,7 @@ class RetryPolicy:
             return None
 
         value = value.strip()
-        if value.isdigit():
+        if value.isascii() and value.isdigit():
             seconds = float(value)
         else:
             try:
